@@ -163,6 +163,43 @@ function mod:OnDisable()
     EnableOverlay = false
 end
 
+------------------------------------------------------------------------
+-- 🆕  Step 2 — единая очередь таймеров
+------------------------------------------------------------------------
+
+-- locals (рядом с остальными счётчиками)
+local pendingButtons, processingQueue = {}, false
+local BATCH_SIZE = 12          -- кнопок за кадр; подберите по вкусу
+
+-- helper: кладём кнопку в очередь
+local function EnqueueButton(bag, slot, itemID, button)
+    local key = bag..","..slot
+    pendingButtons[#pendingButtons+1] = { bag=bag, slot=slot, id=itemID, btn=button, key=key }
+    processingQueue = processingQueue or LibCompat.After(0, mod.ProcessQueue)
+end
+
+-- обработка очереди
+function mod:ProcessQueue()
+    local processed = 0
+    while processed < BATCH_SIZE and #pendingButtons > 0 do
+        local entry = tremove(pendingButtons, 1)
+        local unusable = mod:ScanTooltipOfBagItemForRedText(entry.bag, entry.slot)
+        itemUsableCache[entry.id] = unusable
+        if entry.btn and entry.btn.IconTexture then
+            entry.btn.IconTexture:SetVertexColor(unusable and 1 or 1,
+                    unusable and 0.1 or 1,
+                    unusable and 0.1 or 1)
+        end
+        processed = processed + 1
+    end
+    if #pendingButtons > 0 then                      -- ещё есть работа
+        LibCompat.After(0, mod.ProcessQueue)
+    else
+        processingQueue = false                      -- очередь пуста
+    end
+end
+
+
 -- put this near the top of the file, before you first touch the counters
 local createdTimers, firedTimers = 0, 0      -- both start at 0
 
@@ -176,13 +213,15 @@ function mod:UpdateButton(_, button)
     if not button:IsShown() then return end
 
     -- ① fast path: cached answer per itemID
-    local cached = itemUsableCache[itemID]
-    if cached ~= nil then
-        button.IconTexture:SetVertexColor(cached and 1 or 1,
-                cached and 0.1 or 1,
-                cached and 0.1 or 1)
+    local cache = itemUsableCache[itemID]
+    if cache ~= nil then
+        button.IconTexture:SetVertexColor(cache and 1 or 1,
+                cache and 0.1 or 1,
+                cache and 0.1 or 1)
         return
     end
+    EnqueueButton(button.bag, button.slot, itemID, button)
+
 
     -- ② slow path: first time we meet this itemID → schedule scan
     createdTimers = createdTimers + 1
