@@ -5,13 +5,13 @@ local L = addon.L
 
 local openBagCount = 0
 
--- Ensure LibCompat is loaded
-if not LibStub:GetLibrary("LibCompat-1.0", true) then
-    -- Handle missing LibCompat if necessary, though it's usually present with AceAddon-3.0
+-- Plan Item 1: Correct LibCompat Timer Usage
+local LibCompat = LibStub:GetLibrary("LibCompat-1.0", true)
+if not LibCompat then
     print("AdiBags_ItemOverlayPlus: LibCompat-1.0 not found!")
     return
 end
-local CompatTimer = LibStub("LibCompat-1.0")
+local CompatTimer = LibCompat -- Correctly get the Timer sub-module
 
 local mod = addon:NewModule("ItemOverlayPlus", 'AceEvent-3.0')
 mod.uiName = L['Item Overlay Plus']
@@ -20,11 +20,28 @@ mod.uiDesc = L["Adds a red overlay to items that are unusable for you."]
 local tooltipName = "AdibagsItemOverlayPlusScanningTooltip"
 local tooltipFrame = _G[tooltipName] or CreateFrame("GameTooltip", tooltipName, nil, "GameTooltipTemplate")
 
-local unusableItemsCache = {} -- Cache for scanned items: nil (not scanned), "queued", true (unusable), false (usable)
-
+local unusableItemsCache = {}
 local scanQueue = {}
-local scanTimer = nil
-local SCAN_DELAY_SECONDS = 0.005 -- Time between individual item scans.
+local scanTimerHandle = nil -- Stores the handle from CompatTimer.After
+local SCAN_DELAY_SECONDS = 0.005
+
+-- Plan Item 3: Debounce AdiBags_UpdateAllButtons
+local updateAllButtonsTimerHandle = nil
+local UPDATE_ALL_BUTTONS_DEBOUNCE_TIME = 0.25 -- Debounce time in seconds
+
+local function requestUpdateAllButtons(self)
+    if updateAllButtonsTimerHandle then
+        CompatTimer.CancelTimer(updateAllButtonsTimerHandle)
+        updateAllButtonsTimerHandle = nil
+    end
+    updateAllButtonsTimerHandle = CompatTimer.After(UPDATE_ALL_BUTTONS_DEBOUNCE_TIME, function()
+        -- print("Debounced: Sending AdiBags_UpdateAllButtons")
+        if self.db.profile.EnableOverlay and openBagCount > 0 then -- Re-check conditions before sending
+            self:SendMessage('AdiBags_UpdateAllButtons')
+        end
+        updateAllButtonsTimerHandle = nil
+    end)
+end
 
 function mod:OnInitialize()
     self.db = addon.db:RegisterNamespace(self.moduleName, {
@@ -36,19 +53,17 @@ function mod:OnInitialize()
     local frame = CreateFrame("Frame")
     frame:RegisterEvent("ITEM_LOCK_UPDATE")
     frame:RegisterEvent("BAG_UPDATE")
-    frame:RegisterEvent("CURRENT_SPELL_CAST_CHANGED") -- Re-added event
+    frame:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
     frame:SetScript("OnEvent", function(_, event, ...)
         if not self.db.profile.EnableOverlay or openBagCount == 0 then
+            if updateAllButtonsTimerHandle then
+                CompatTimer.CancelTimer(updateAllButtonsTimerHandle)
+                updateAllButtonsTimerHandle = nil
+            end
             return
         end
-
-        if event == "ITEM_LOCK_UPDATE" or event == "BAG_UPDATE" or event == "CURRENT_SPELL_CAST_CHANGED" then
-            -- For these events, tell AdiBags to update all buttons.
-            -- Our QueueButtonScan will efficiently re-apply colors for cached items
-            -- or queue new/changed items for scanning.
-            -- print("Event causing full update:", event)
-            self:SendMessage('AdiBags_UpdateAllButtons')
-        end
+        -- print("Event triggering requestUpdateAllButtons:", event)
+        requestUpdateAllButtons(self)
     end)
 
     local frame2 = CreateFrame("Frame")
@@ -59,14 +74,12 @@ function mod:OnInitialize()
             return
         end
 
-        if event == "ITEM_UNLOCKED" or event == "ITEM_LOCKED" then
-            if _G["AdiBagsContainer1"] then -- Check if AdiBags UI is likely present
-                local itemID = GetContainerItemID(bag, slot)
-                if itemID then
-                    -- print("Item (un)locked, clearing cache for:", bag, slot)
-                    unusableItemsCache[bag .. "," .. slot] = nil
-                    self:SendMessage('AdiBags_UpdateAllButtons')
-                end
+        if _G["AdiBagsContainer1"] then
+            local itemID = GetContainerItemID(bag, slot)
+            if itemID then
+                -- print("Item (un)locked, clearing cache for:", bag, slot)
+                unusableItemsCache[bag .. "," .. slot] = nil
+                requestUpdateAllButtons(self)
             end
         end
     end)
@@ -84,24 +97,25 @@ function mod:GetOptions()
             set = function(_, value)
                 self.db.profile.EnableOverlay = value
                 if not value then
-                    self:CancelAndClearScanQueue()
+                    self:CancelAndClearScanQueue() -- Clears scan queue and resets "queued" items
+                    if updateAllButtonsTimerHandle then
+                        CompatTimer.CancelTimer(updateAllButtonsTimerHandle)
+                        updateAllButtonsTimerHandle = nil
+                    end
                     -- Reset all currently visible item colors
                     for _, bagWindow in ipairs(addon:GetBagWindows()) do
                         if bagWindow:IsVisible() then
                             for _, button in bagWindow:IterateButtons() do
                                 if button:IsVisible() and button.IconTexture then
                                     button.IconTexture:SetVertexColor(1, 1, 1)
-                                    local key = button.bag .. "," .. button.slot
-                                    if unusableItemsCache[key] == "queued" then
-                                        unusableItemsCache[key] = nil
-                                    end
+                                    -- No need to touch unusableItemsCache here if it's not "queued"
                                 end
                             end
                         end
                     end
                 else
-                    if openBagCount > 0 then -- Only update if bags are already open
-                        self:SendMessage('AdiBags_UpdateAllButtons')
+                    if openBagCount > 0 then
+                        requestUpdateAllButtons(self)
                     end
                 end
             end,
@@ -119,6 +133,7 @@ function mod:OnEnable()
 end
 
 function mod:OnDisable()
+    -- print("ItemOverlayPlus: OnDisable called")
     self:UnregisterMessage('AdiBags_UpdateButton')
     self:UnregisterMessage('AdiBags_BagSwapPanelClosed')
     self:UnregisterMessage('AdiBags_NewItemReset')
@@ -126,32 +141,42 @@ function mod:OnDisable()
     self:UnregisterMessage('AdiBags_BagOpened')
     self:UnregisterMessage('AdiBags_BagClosed')
 
-    self:CancelAndClearScanQueue()
-    wipe(unusableItemsCache)
+    self:CancelAndClearScanQueue() -- Plan Item 2: Clears scan queue, resets "queued", cancels timer
+    wipe(unusableItemsCache)       -- Plan Item 2: Full cache wipe
     openBagCount = 0
+
+    if updateAllButtonsTimerHandle then
+        CompatTimer.CancelTimer(updateAllButtonsTimerHandle)
+        updateAllButtonsTimerHandle = nil
+    end
+    -- print("ItemOverlayPlus: OnDisable complete. Cache size:", self:_CountTable(unusableItemsCache), "Queue size:", #scanQueue)
 end
 
+-- Plan Item 2: Aggressive Cache & Queue Cleanup
 function mod:CancelAndClearScanQueue()
-    if scanTimer then
-        CompatTimer.Cancel(scanTimer)
-        scanTimer = nil
+    -- print("ItemOverlayPlus: CancelAndClearScanQueue called")
+    if scanTimerHandle then
+        CompatTimer.CancelTimer(scanTimerHandle)
+        scanTimerHandle = nil
     end
-    wipe(scanQueue)
+    wipe(scanQueue) -- Wipe the queue itself
+    -- Reset any items in cache that were marked as "queued"
     for key, status in pairs(unusableItemsCache) do
         if status == "queued" then
             unusableItemsCache[key] = nil
         end
     end
+    -- print("ItemOverlayPlus: Scan queue cleared. Queue size:", #scanQueue)
 end
 
 function mod:OnBagOpened()
     openBagCount = openBagCount + 1
+    -- print("ItemOverlayPlus: OnBagOpened. Count:", openBagCount)
     if self.db.profile.EnableOverlay then
         -- Delay slightly to allow AdiBags to fully initialize its buttons
-        -- Using LibCompat.After directly here for a one-shot delay.
-        LibStub("LibCompat-1.0").After(0.1, function()
+        LibCompat.After(0.15, function() -- Use main LibCompat.After for simple one-shot delays
             if openBagCount > 0 and self.db.profile.EnableOverlay then -- Re-check state
-                self:SendMessage('AdiBags_UpdateAllButtons')
+                requestUpdateAllButtons(self)
             end
         end)
     end
@@ -160,50 +185,82 @@ end
 function mod:OnBagClosed()
     if openBagCount > 0 then
         openBagCount = openBagCount - 1
+        -- print("ItemOverlayPlus: OnBagClosed. Count:", openBagCount)
         if openBagCount == 0 then
-            self:CancelAndClearScanQueue()
-            wipe(unusableItemsCache)
+            -- print("ItemOverlayPlus: All bags closed. Wiping cache and queue.")
+            self:CancelAndClearScanQueue() -- Plan Item 2
+            wipe(unusableItemsCache)       -- Plan Item 2
+            if updateAllButtonsTimerHandle then
+                CompatTimer.CancelTimer(updateAllButtonsTimerHandle)
+                updateAllButtonsTimerHandle = nil
+            end
+            -- print("ItemOverlayPlus: Cache and queue wiped. Cache size:", self:_CountTable(unusableItemsCache), "Queue size:", #scanQueue)
         end
     end
 end
 
 function mod:TidyBagsUpdateRed()
-    wipe(unusableItemsCache)
-    if self.db.profile.EnableOverlay and openBagCount > 0 then
-        self:SendMessage('AdiBags_UpdateAllButtons')
+    -- print("ItemOverlayPlus: TidyBagsUpdateRed called.")
+    if openBagCount > 0 and self.db.profile.EnableOverlay then -- Only if active
+        wipe(unusableItemsCache)
+        requestUpdateAllButtons(self)
     end
 end
 
 function mod:ItemPositionChanged()
-    wipe(unusableItemsCache)
-    if self.db.profile.EnableOverlay and openBagCount > 0 then
-        self:SendMessage('AdiBags_UpdateAllButtons')
+    -- print("ItemOverlayPlus: ItemPositionChanged called.")
+    if openBagCount > 0 and self.db.profile.EnableOverlay then -- Only if active
+        wipe(unusableItemsCache)
+        requestUpdateAllButtons(self)
     end
 end
 
 function mod:ProcessScanQueue()
-    scanTimer = nil
+    scanTimerHandle = nil -- Timer has fired or been cancelled if we are here
 
     if not self.db.profile.EnableOverlay or openBagCount == 0 or #scanQueue == 0 then
-        wipe(scanQueue)
+        wipe(scanQueue) -- Ensure queue is empty if we bail early
         return
     end
 
     local buttonToScan = tremove(scanQueue, 1)
-    if not buttonToScan then return end -- Should be caught by #scanQueue check, but defensive
+    if not buttonToScan then return end -- Should be caught by #scanQueue check
 
-    if not buttonToScan:IsVisible() or not GetContainerItemID(buttonToScan.bag, buttonToScan.slot) then
-        unusableItemsCache[buttonToScan.bag .. "," .. buttonToScan.slot] = nil
+    local key = buttonToScan.bag .. "," .. buttonToScan.slot
+
+    -- Plan Item 5: Review `ProcessScanQueue` Button Validity
+    -- Check if button is still valid and visible in an AdiBags context
+    local isButtonValidAndVisible = buttonToScan:IsVisible() and GetContainerItemID(buttonToScan.bag, buttonToScan.slot)
+    if isButtonValidAndVisible then
+        local parent = buttonToScan:GetParent()
+        local adiBagsWindowVisible = false
+        while parent do
+            if parent == UIParent then break end -- Reached top without finding AdiBags window
+            -- A simple check, AdiBags container frames usually have a bagID or are named like AdiBagsContainerX
+            if (parent.bagID or string.match(parent:GetName() or "", "AdiBagsContainer")) and parent:IsVisible() then
+                adiBagsWindowVisible = true
+                break
+            end
+            parent = parent:GetParent()
+        end
+        if not adiBagsWindowVisible then
+            isButtonValidAndVisible = false -- Mark as invalid if its AdiBags window isn't visible
+        end
+    end
+
+    if not isButtonValidAndVisible then
+        unusableItemsCache[key] = nil -- Reset cache status if button became invalid/invisible
         if #scanQueue > 0 then
-            scanTimer = CompatTimer.After(SCAN_DELAY_SECONDS, function() self:ProcessScanQueue() end)
+            scanTimerHandle = CompatTimer.After(SCAN_DELAY_SECONDS, function() self:ProcessScanQueue() end)
         end
         return
     end
 
-    local key = buttonToScan.bag .. "," .. buttonToScan.slot
+    -- print("Processing scan for:", key)
     local isUnusable = self:ScanTooltipOfBagItemForRedText(buttonToScan.bag, buttonToScan.slot)
-    unusableItemsCache[key] = isUnusable
+    unusableItemsCache[key] = isUnusable -- Store actual boolean result
 
+    -- Re-check visibility and apply color, only if overlay is still enabled and button still visible
     if self.db.profile.EnableOverlay and buttonToScan:IsVisible() and buttonToScan.IconTexture then
         if isUnusable then
             buttonToScan.IconTexture:SetVertexColor(1, 0.1, 0.1)
@@ -213,7 +270,9 @@ function mod:ProcessScanQueue()
     end
 
     if #scanQueue > 0 then
-        scanTimer = CompatTimer.After(SCAN_DELAY_SECONDS, function() self:ProcessScanQueue() end)
+        scanTimerHandle = CompatTimer.After(SCAN_DELAY_SECONDS, function() self:ProcessScanQueue() end)
+    else
+        -- print("ItemOverlayPlus: Scan queue finished processing.")
     end
 end
 
@@ -228,7 +287,7 @@ function mod:QueueButtonScan(event, button)
     end
 
     if not GetContainerItemID(button.bag, button.slot) then return end
-    if not button:IsVisible() then return end
+    if not button:IsVisible() then return end -- Important: only queue visible buttons
 
     local key = button.bag .. "," .. button.slot
     local cachedStatus = unusableItemsCache[key]
@@ -241,14 +300,16 @@ function mod:QueueButtonScan(event, button)
         end
         return
     elseif cachedStatus == "queued" then
-        return
+        return -- Already in queue or being processed
     end
 
     unusableItemsCache[key] = "queued"
     table.insert(scanQueue, button)
+    -- print("Queued for scan:", key, "#scanQueue:", #scanQueue)
 
-    if not scanTimer and #scanQueue > 0 then
-        scanTimer = CompatTimer.After(0, function() self:ProcessScanQueue() end)
+    if not scanTimerHandle and #scanQueue > 0 then
+        -- print("Starting scan timer.")
+        scanTimerHandle = CompatTimer.After(0, function() self:ProcessScanQueue() end) -- Start ASAP
     end
 end
 
@@ -263,8 +324,6 @@ end
 function mod:ScanTooltipOfBagItemForRedText(bag, slot)
     tooltipFrame:ClearLines()
     tooltipFrame:SetBagItem(bag, slot)
-    -- No specific handling for bag < 0 for SetInventoryItem as AdiBags should provide
-    -- bag/slot that SetBagItem can understand (e.g. bag = -1 for main bank).
 
     for i = 1, tooltipFrame:NumLines() do
         if isTextColorRed(_G[tooltipName .. "TextLeft" .. i]) or isTextColorRed(_G[tooltipName .. "TextRight" .. i]) then
@@ -272,4 +331,12 @@ function mod:ScanTooltipOfBagItemForRedText(bag, slot)
         end
     end
     return false
+end
+
+-- Helper for debugging cache size (Plan Item 4 - if needed)
+function mod:_CountTable(t)
+    if not t then return 0 end
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
 end
