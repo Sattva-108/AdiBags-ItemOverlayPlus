@@ -164,40 +164,73 @@ function mod:OnDisable()
 end
 
 ------------------------------------------------------------------------
+-- 🆕  Step 4 — красим кнопку Только когда цвет реально меняется
+------------------------------------------------------------------------
+
+-- helper рядом с другими локальными функциями
+local function ApplyOverlay(button, unusable)
+    -- 0 = белый, 1 = красный  (храним для логики, но не доверяем UI)
+    button.__overlayState = unusable and 1 or 0
+
+    if unusable then
+        button.IconTexture:SetVertexColor(1, 0.1, 0.1)
+    else
+        button.IconTexture:SetVertexColor(1, 1,   1)
+    end
+end
+
+
+------------------------------------------------------------------------
 -- 🆕  Step 2 — единая очередь таймеров
 ------------------------------------------------------------------------
 
 -- locals (рядом с остальными счётчиками)
 local pendingButtons, processingQueue = {}, false
+local pendingItem = {}   -- pendingItem[id] = true
 local BATCH_SIZE = 12          -- кнопок за кадр; подберите по вкусу
 
--- helper: кладём кнопку в очередь
-local function EnqueueButton(bag, slot, itemID, button)
-    local key = bag..","..slot
-    pendingButtons[#pendingButtons+1] = { bag=bag, slot=slot, id=itemID, btn=button, key=key }
-    processingQueue = processingQueue or LibCompat.After(0, mod.ProcessQueue)
-end
-
 -- обработка очереди
-function mod:ProcessQueue()
+local function ProcessQueue()
     local processed = 0
     while processed < BATCH_SIZE and #pendingButtons > 0 do
         local entry = tremove(pendingButtons, 1)
+
         local unusable = mod:ScanTooltipOfBagItemForRedText(entry.bag, entry.slot)
         itemUsableCache[entry.id] = unusable
+        -- в ProcessQueue после itemUsableCache[itemID] = unusable
+        pendingItem[entry.id] = nil                         -- сняли блокировку
+
+
         if entry.btn and entry.btn.IconTexture then
-            entry.btn.IconTexture:SetVertexColor(unusable and 1 or 1,
-                    unusable and 0.1 or 1,
-                    unusable and 0.1 or 1)
+            ApplyOverlay(entry.btn, unusable)
         end
         processed = processed + 1
     end
-    if #pendingButtons > 0 then                      -- ещё есть работа
-        LibCompat.After(0, mod.ProcessQueue)
+
+    if #pendingButtons > 0 then            -- ещё работа → следующий кадр
+        LibCompat.After(0, ProcessQueue)
     else
-        processingQueue = false                      -- очередь пуста
+        processingQueue = false            -- очередь пуста
     end
 end
+
+-- helper: кладём кнопку в очередь
+
+-- EnqueueButton
+local function EnqueueButton(bag, slot, itemID, button)
+    if pendingItem[itemID] then return end          -- уже ждёт скана
+    pendingItem[itemID] = true                      -- помечаем
+
+    pendingButtons[#pendingButtons+1] =
+    { bag = bag, slot = slot, id = itemID, btn = button }
+
+    if not processingQueue then
+        processingQueue = true
+        LibCompat.After(0, ProcessQueue)
+    end
+end
+
+
 
 
 -- put this near the top of the file, before you first touch the counters
@@ -205,41 +238,35 @@ local createdTimers, firedTimers = 0, 0      -- both start at 0
 
 
 -- replace the body of UpdateButton
+------------------------------------------------------------------------
+--  FULL UpdateButton with debug
+------------------------------------------------------------------------
 function mod:UpdateButton(_, button)
     if not EnableOverlay then return end
 
     local itemID = GetContainerItemID(button.bag, button.slot)
-    if not itemID          then return end           -- empty slot
-    if not button:IsShown() then return end
 
-    -- ① fast path: cached answer per itemID
-    local cache = itemUsableCache[itemID]
-    if cache ~= nil then
-        button.IconTexture:SetVertexColor(cache and 1 or 1,
-                cache and 0.1 or 1,
-                cache and 0.1 or 1)
+    -- ► слот опустел — всегда сбрасываем красный
+    if not itemID then
+        ApplyOverlay(button, false)
+        --print("[IOP] empty", button.bag, button.slot)
         return
     end
+
+    -- ► быстрый путь: уже знаем пригодность этого itemID
+    local cached = itemUsableCache[itemID]
+    if cached ~= nil then
+        ApplyOverlay(button, cached)                   -- ← ставим цвет!
+--        print("[IOP] fast", itemID, cached and "red" or "white")
+        return
+    end
+
+    -- ► медленный путь: кладём кнопку в общую очередь
     EnqueueButton(button.bag, button.slot, itemID, button)
-
-
-    -- ② slow path: first time we meet this itemID → schedule scan
-    createdTimers = createdTimers + 1
-    local id = createdTimers
-    print("Timer created #"..id, "itemID", itemID, "slot", button.slot)
-
-    LibCompat.After(0.03 * (button.slot - 1), function()
-        firedTimers = firedTimers + 1
-        print("Timer fired  #"..id)
-
-        local unusable = mod:ScanTooltipOfBagItemForRedText(button.bag, button.slot)
-        itemUsableCache[itemID] = unusable      -- store result
-
-        button.IconTexture:SetVertexColor(unusable and 1 or 1,
-                unusable and 0.1 or 1,
-                unusable and 0.1 or 1)
-    end)
+--    print("[IOP] queued", itemID, "slot", button.slot)
 end
+
+
 
 
 local function roundRGB(r, g, b)
