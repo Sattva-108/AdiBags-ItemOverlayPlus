@@ -31,7 +31,7 @@ function mod:OnInitialize()
     frame:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
     frame:SetScript("OnEvent", function(_, event, ...)
         if event == "ITEM_LOCK_UPDATE" or event == "CURRENT_SPELL_CAST_CHANGED" or event == "BAG_UPDATE" then
-            if _G["AdiBagsContainer1"] and AdiBagsContainer1:IsVisible() then
+            if openBagCount > 0 then
                 -- print(event)
                 self:SendMessage('AdiBags_UpdateAllButtons')
             end
@@ -84,7 +84,7 @@ end
 function mod:OnEnable()
 
     EnableOverlay = true
-    self:RegisterMessage('AdiBags_UpdateButton', 'UpdateButton')
+    --self:RegisterMessage('AdiBags_UpdateButton', 'UpdateButton')
 
     self:RegisterMessage('AdiBags_BagSwapPanelClosed', 'ItemPositionChanged')
     self:RegisterMessage('AdiBags_NewItemReset', 'ItemPositionChanged')
@@ -113,9 +113,7 @@ end
 
 function mod:OnBagClosed()
     if openBagCount > 0 then
-        print(openBagCount.. " before")
         openBagCount = openBagCount - 1
-        print(openBagCount.." after")
         if openBagCount == 0 then          -- все сумки закрыты
             self:UnregisterMessage('AdiBags_UpdateButton')
             -- на всякий случай сбросим таймеры/кэш
@@ -144,6 +142,8 @@ function mod:OnDisable()
     EnableOverlay = false
 end
 
+local updateCount = 0
+
 function mod:UpdateButton(event, button)
     if not EnableOverlay then
         return
@@ -153,11 +153,14 @@ function mod:UpdateButton(event, button)
     end
 
 
+
     -- Check if the item is visible on the screen
     if not button:IsVisible() then
         return
     end
-
+    --updateCount = 0
+    updateCount = updateCount + 1
+    print(updateCount)
 
     -- Check if the item has already been scanned
     local key = button.bag .. "," .. button.slot
