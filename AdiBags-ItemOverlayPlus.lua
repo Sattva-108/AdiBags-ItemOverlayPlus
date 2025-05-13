@@ -3,6 +3,9 @@ local _, ns = ...
 local addon = LibStub('AceAddon-3.0'):GetAddon('AdiBags')
 local L = addon.L
 
+-- Вверху файла (после локальных объявлений)
+local openBagCount = 0   -- сколько сумок AdiBags сейчас отображается?
+
 LibCompat = LibStub:GetLibrary("LibCompat-1.0")
 
 local mod = addon:NewModule("ItemOverlayPlus", 'AceEvent-3.0')
@@ -88,7 +91,39 @@ function mod:OnEnable()
     -- self:RegisterMessage('AdiBags_TidyBagsButtonClick', 'ItemPositionChanged')
 
     self:RegisterMessage('AdiBags_TidyBags', 'TidyBagsUpdateRed')
+
+    -- В OnEnable (или сразу после него)
+    self:RegisterMessage('AdiBags_BagOpened',  'OnBagOpened')
+    self:RegisterMessage('AdiBags_BagClosed', 'OnBagClosed')
+
 end
+
+function mod:OnBagOpened()
+    openBagCount = openBagCount + 1
+    if openBagCount == 1 then
+        self:RegisterMessage('AdiBags_UpdateButton', 'UpdateButton')
+    end
+
+    -- ⚡ Запрашиваем перекраску всех кнопок
+    LibCompat.After(0, function()
+        self:SendMessage('AdiBags_UpdateAllButtons')
+    end)
+end
+
+
+function mod:OnBagClosed()
+    if openBagCount > 0 then
+        print(openBagCount.. " before")
+        openBagCount = openBagCount - 1
+        print(openBagCount.." after")
+        if openBagCount == 0 then          -- все сумки закрыты
+            self:UnregisterMessage('AdiBags_UpdateButton')
+            -- на всякий случай сбросим таймеры/кэш
+            wipe(unusableItemsCache)
+        end
+    end
+end
+
 
 function mod:TidyBagsUpdateRed()
     wipe(unusableItemsCache)
