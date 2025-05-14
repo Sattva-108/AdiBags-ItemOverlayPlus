@@ -71,7 +71,22 @@ function mod:OnInitialize()
             end
         end
     end)
+
+    ------------------------------------------------------------------------
+    --  сброс кэша при апе уровня
+    ------------------------------------------------------------------------
+    local levelFrame = CreateFrame("Frame")
+    levelFrame:RegisterEvent("PLAYER_LEVEL_UP")
+    levelFrame:SetScript("OnEvent", function()
+        wipe(itemUsableCache)
+        if openBagCount > 0 then
+            mod:SendMessage('AdiBags_UpdateAllButtons')
+        end
+    end)
+
 end
+
+
 
 
 function mod:GetOptions()
@@ -231,10 +246,22 @@ local function EnqueueButton(bag, slot, itemID, button)
 end
 
 
+------------------------------------------------------------------------
+--  БЫСТРАЯ ПРОВЕРКА ТОЛЬКО ПО УРОВНЮ  (heuristic v2)
+--  • если минимальный уровень выше текущего – сразу красный
+--  • всё остальное отправляем на полный tooltip-скан
+------------------------------------------------------------------------
+local function QuickPreCheck(itemID)
+    local _, _, _, _, minLevel = GetItemInfo(itemID)
+    if not minLevel then return nil end          -- info ещё не в кэше
 
+    local playerLevel = UnitLevel("player")
+    if minLevel > playerLevel then
+        return false                             -- точно непригоден
+    end
+    return nil                                   -- нужно точное чтение
+end
 
--- put this near the top of the file, before you first touch the counters
-local createdTimers, firedTimers = 0, 0      -- both start at 0
 
 
 -- replace the body of UpdateButton
@@ -246,10 +273,19 @@ function mod:UpdateButton(_, button)
 
     local itemID = GetContainerItemID(button.bag, button.slot)
 
+
     -- ► слот опустел — всегда сбрасываем красный
     if not itemID then
         ApplyOverlay(button, false)
         --print("[IOP] empty", button.bag, button.slot)
+        return
+    end
+
+    -- Вставь в UpdateButton перед EnqueueButton
+    local pre = QuickPreCheck(itemID)
+    if pre ~= nil then               -- решили только по уровню
+        itemUsableCache[itemID] = pre
+        ApplyOverlay(button, pre)
         return
     end
 
