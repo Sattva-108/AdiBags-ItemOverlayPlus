@@ -204,40 +204,61 @@ local pendingButtons, processingQueue = {}, false
 local pendingItem = {}   -- pendingItem[id] = true
 local BATCH_SIZE = 12          -- кнопок за кадр; подберите по вкусу
 
+-- === очередь с head / tail ===========================================
+local queue   = {}        -- кольцевая, key = tail индекс
+local qHead   = 1         -- позиция следующего элемента к обработке
+local qTail   = 0         -- позиция последнего добавленного
+
+local function QueueIsEmpty() return qTail < qHead end
+
+local function QueuePush(entry)
+    qTail = qTail + 1
+    queue[qTail] = entry
+end
+
+local function QueuePop()
+    local entry = queue[qHead]
+    queue[qHead] = nil     -- снимаем ссылку
+    qHead = qHead + 1
+    return entry
+end
+
+
 -- обработка очереди
 local function ProcessQueue()
     local processed = 0
-    while processed < BATCH_SIZE and #pendingButtons > 0 do
-        local entry = tremove(pendingButtons, 1)
+    while processed < BATCH_SIZE and not QueueIsEmpty() do
+        local e = QueuePop()
 
-        local unusable = mod:ScanTooltipOfBagItemForRedText(entry.bag, entry.slot)
-        itemUsableCache[entry.id] = unusable
-        -- в ProcessQueue после itemUsableCache[itemID] = unusable
-        pendingItem[entry.id] = nil                         -- сняли блокировку
+        local unusable = mod:ScanTooltipOfBagItemForRedText(e.bag, e.slot)
+        itemUsableCache[e.id] = unusable
+        pendingItem[e.id]     = nil        -- снимаем блок
 
-
-        if entry.btn and entry.btn.IconTexture then
-            ApplyOverlay(entry.btn, unusable)
+        if e.btn and e.btn.IconTexture then
+            ApplyOverlay(e.btn, unusable)
         end
         processed = processed + 1
     end
 
-    if #pendingButtons > 0 then            -- ещё работа → следующий кадр
+    if not QueueIsEmpty() then
         LibCompat.After(0, ProcessQueue)
     else
-        processingQueue = false            -- очередь пуста
+        -- сброс указателей для GC-дружелюбности
+        queue, qHead, qTail = {}, 1, 0
+        processingQueue = false
     end
 end
+
 
 -- helper: кладём кнопку в очередь
 
 -- EnqueueButton
+-- helper: кладём кнопку в очередь
 local function EnqueueButton(bag, slot, itemID, button)
-    if pendingItem[itemID] then return end          -- уже ждёт скана
-    pendingItem[itemID] = true                      -- помечаем
+    if pendingItem[itemID] then return end
+    pendingItem[itemID] = true
 
-    pendingButtons[#pendingButtons+1] =
-    { bag = bag, slot = slot, id = itemID, btn = button }
+    QueuePush({ bag=bag, slot=slot, id=itemID, btn=button })
 
     if not processingQueue then
         processingQueue = true
